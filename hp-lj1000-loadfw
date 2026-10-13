@@ -24,9 +24,13 @@ import ctypes
 import ctypes.util
 import glob
 import os
+import re
+import shutil
 import struct
+import subprocess
 import sys
 import time
+import urllib.parse
 
 FW = "/usr/share/foo2zjs/firmware/sihp1000.dl"
 VID, PID = "03f0", "0517"
@@ -214,10 +218,55 @@ def upload(path, force=False):
         rebind_usblp(sysdev)
 
 
+def find_queue():
+    """Name of the CUPS queue pointed at this printer, if there is one."""
+    try:
+        out = subprocess.run(["lpstat", "-v"], capture_output=True,
+                             text=True).stdout
+    except OSError:
+        return None
+    for line in out.splitlines():
+        m = re.match(r"device for (.+): (\S+)", line.strip())
+        if not m:
+            continue
+        name, uri = m.group(1), urllib.parse.unquote(m.group(2))
+        if "laserjet 1000" in uri.lower():
+            return name
+    return None
+
+
+def reenable_queue():
+    """Re-enable the CUPS queue.
+
+    While this script holds the USB interface for the upload, cupsd (via
+    udev-configure-printer) will try to talk to the printer, fail, and
+    disable the queue with "Unable to send data to printer".  Nothing puts
+    it back afterwards, so a perfectly healthy printer looks dead until
+    someone notices and runs cupsenable by hand.  Do that for them.
+
+    Only touches the queue for *this* printer, never every queue.
+    """
+    name = find_queue()
+    if not name:
+        print("  no CUPS queue for this printer - nothing to re-enable")
+        return
+    for tool in ("cupsenable", "cupsaccept"):
+        exe = shutil.which(tool)
+        if not exe:
+            continue
+        r = subprocess.run([exe, name], capture_output=True, text=True)
+        msg = "ok" if r.returncode == 0 else (r.stderr or r.stdout).strip()
+        print("  %s %s: %s" % (tool, name, msg))
+
+
 if __name__ == "__main__":
     force = "--force" in sys.argv
     if not os.path.exists(FW):
         print("ERROR: %s is missing - run ./fetch-firmware.sh" % FW,
               file=sys.stderr)
         sys.exit(1)
-    sys.exit(0 if upload(FW, force) else 1)
+    ok = upload(FW, force)
+    if ok:
+        # Only when the printer is actually usable again.
+        reenable_queue()
+    sys.exit(0 if ok else 1)

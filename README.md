@@ -241,6 +241,33 @@ sudo cupsaccept  hp-LaserJet-1000
 sudo cancel -a   hp-LaserJet-1000
 ```
 
+**Queue says `disabled … Unable to send data to printer` after a power cycle**
+
+`cupsd` (via `udev-configure-printer`) tries to talk to the printer while the
+firmware upload still holds the USB interface, fails, and disables the queue.
+`hp-lj1000-loadfw` now re-enables it automatically once the upload finishes,
+so this should self-heal. If you ever see it stuck anyway, the three commands
+above clear it.
+
+**Orange (Attention) LED flashing, printer unresponsive**
+
+This is a *printer-side* error, usually paper out or a jam — the Linux side
+is normally still fine. Check with:
+
+```bash
+lpstat -p                 # idle/enabled = software is OK
+sudo /usr/lib/cups/backend/usb | grep -o 'FWVER:[0-9]*'
+#   FWVER:20011207        # firmware still resident -> no re-upload needed
+```
+
+If `FWVER:` is still there, do **not** power-cycle first — just load paper
+and press the front-panel button once to clear the error. Power-cycling is
+only needed if the engine stays wedged, and it costs you a firmware re-upload
+(the udev rule handles that automatically).
+
+If `FWVER:` is *gone*, the printer lost power: firmware was re-uploaded
+automatically, or run `sudo hp-lj1000-loadfw`.
+
 ---
 
 ## Uninstall
