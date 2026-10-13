@@ -1,0 +1,36 @@
+# --- Firmware: HP-copyrighted, never committed ------------------------
+*.dl
+*.img
+*.tar.gz
+*.tgz
+*.exe
+firmware/
+
+# --- Generated / build output ----------------------------------------
+arm2zjs
+arm2hpdl
+foo2zjs
+*.zjs
+*.pbm
+*.pbmraw
+*.png
+*.ppm
+*.preview.*
+__pycache__/
+*.pyc
+
+# --- Scratch ----------------------------------------------------------
+work/
+tmp/
+out/
+*.bak
+*.orig
+*.rej
+
+# --- Editors / OS -----------------------------------------------------
+*~
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/

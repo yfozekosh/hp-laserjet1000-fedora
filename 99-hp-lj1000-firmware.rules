@@ -1,0 +1,7 @@
+# HP LaserJet 1000 (03f0:0517) is host-based: it has no engine firmware in
+# ROM and must be re-uploaded over USB every time it is powered on.
+#
+# The udev rule only *wants* the unit; it never blocks udev.  The unit
+# sleeps briefly so the device can settle before we reset and claim it.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03f0", ATTR{idProduct}=="0517", \
+  TAG+="systemd", ENV{SYSTEMD_WANTS}+="hp-lj1000-loadfw.service"

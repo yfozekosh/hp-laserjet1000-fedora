@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Upload HP LaserJet 1000 host-based firmware (sihp1000.dl) over USB.
+
+The LaserJet 1000 (USB ID 03f0:0517) is a *host-based* printer.  It keeps
+no engine firmware in ROM: the firmware image must be re-uploaded over USB
+every single time the printer is powered on.
+
+Without firmware the USB microcontroller still enumerates and still answers
+GET_DEVICE_ID (it runs from its own ROM), so the printer *looks* alive --
+but the print engine never wakes up and every bulk OUT pipe stalls with
+EPIPE.  The stock CUPS usb backend has no stall recovery, so it aborts on
+the first EPIPE and reports "Sent 0 bytes".
+
+This uploader talks to usbfs directly and recovers each stall with
+USBDEVFS_CLEAR_HALT, which is how the 114 KB image gets delivered intact.
+
+Usage:
+    hp-lj1000-loadfw [--force]
+
+    --force   re-upload even if the printer already reports FWVER:
+"""
+import ctypes
+import ctypes.util
+import glob
+import os
+import struct
+import sys
+import time
+
+FW = "/usr/share/foo2zjs/firmware/sihp1000.dl"
+VID, PID = "03f0", "0517"
+
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+libc.ioctl.restype = ctypes.c_int
+
+# <linux/usbdevice_fs.h>
+RESET = 0x5514          # USBDEVFS_RESET
+CLAIM = 0x8004550F      # USBDEVFS_CLAIMINTERFACE
+RELEASE = 0x80045510    # USBDEVFS_RELEASEINTERFACE
+CLEAR = 0x80045515      # USBDEVFS_CLEAR_HALT
+BULK = 0xC0185502       # USBDEVFS_BULK
+CTRL = 0xC0185500       # USBDEVFS_CONTROL
+EP_OUT = 0x01           # bulk endpoint 1 OUT
+EP_IN = 0x81
+
+CHUNK = 64              # endpoint 1 max packet size (full speed)
+TIMEOUT_MS = 5000
+MAX_BAD_RUN = 40        # consecutive stalls tolerated before giving up
+
+uarg = lambda v: ctypes.byref(ctypes.c_uint(v))
+
+
+def ioctl(fd, op, arg=0):
+    r = libc.ioctl(fd, op, arg)
+    if r < 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
+    return r
+
+
+def find_sysfs():
+    """Return the sysfs directory of our printer, or None."""
+    for dev in glob.glob("/sys/bus/usb/devices/*"):
+        try:
+            with open(os.path.join(dev, "idVendor")) as f:
+                if f.read().strip() != VID:
+                    continue
+            with open(os.path.join(dev, "idProduct")) as f:
+                if f.read().strip() != PID:
+                    continue
+        except OSError:
+            continue
+        return dev
+    return None
+
+
+def usbfs_node(sysdev):
+    with open(os.path.join(sysdev, "busnum")) as f:
+        busnum = int(f.read().strip())
+    with open(os.path.join(sysdev, "devnum")) as f:
+        devnum = int(f.read().strip())
+    return "/dev/bus/usb/%03d/%03d" % (busnum, devnum)
+
+
+def usblp_bound(sysdev):
+    """Names of interfaces currently bound to the usblp driver (ours only)."""
+    base = os.path.basename(sysdev)
+    bound = []
+    for iface in glob.glob("/sys/bus/usb/devices/%s:*" % base):
+        drv = os.path.join(iface, "driver")
+        if not os.path.islink(drv):
+            continue
+        if os.path.basename(os.readlink(drv)) == "usblp":
+            bound.append(os.path.basename(iface))
+    return bound
+
+
+def unbind_usblp(sysdev):
+    """usblp must not hold the interface while we claim it via usbfs."""
+    for name in usblp_bound(sysdev):
+        try:
+            with open("/sys/bus/usb/drivers/usblp/unbind", "w") as f:
+                f.write(name)
+            print("  unbound usblp %s" % name)
+        except OSError as e:
+            print("  unbind %s: %s" % (name, e))
+
+
+def rebind_usblp(sysdev):
+    for name in usblp_bound(sysdev):
+        pass
+    base = os.path.basename(sysdev)
+    for iface in glob.glob("/sys/bus/usb/devices/%s:*" % base):
+        name = os.path.basename(iface)
+        drv = os.path.join(iface, "driver")
+        if os.path.islink(drv):
+            continue
+        try:
+            with open("/sys/bus/usb/drivers/usblp/bind", "w") as f:
+                f.write(name)
+            print("  rebound usblp %s" % name)
+            return
+        except OSError:
+            pass
+
+
+def device_id(fd):
+    """GET_DEVICE_ID (class request 0xA1, code 0)."""
+    buf = ctypes.create_string_buffer(1024)
+    pkt = ctypes.create_string_buffer(
+        struct.pack("BBHHHI4xQ", 0xA1, 0, 0, 0, 1024, TIMEOUT_MS,
+                    ctypes.addressof(buf)))
+    n = ioctl(fd, CTRL, pkt)
+    raw = buf.raw[:n]
+    if len(raw) < 2:
+        return ""
+    ln = struct.unpack(">H", raw[:2])[0]
+    return raw[2:2 + ln].decode("latin-1", "replace")
+
+
+def upload(path, force=False):
+    with open(path, "rb") as f:
+        payload = f.read()
+    print("  firmware: %s (%d bytes)" % (path, len(payload)))
+
+    sysdev = find_sysfs()
+    if not sysdev:
+        print("  ERROR: printer not found on USB", file=sys.stderr)
+        return False
+
+    unbind_usblp(sysdev)
+    time.sleep(1)
+
+    dev = usbfs_node(sysdev)
+    print("  device: %s (%s)" % (dev, sysdev))
+
+    fd = os.open(dev, os.O_RDWR)
+    try:
+        before = device_id(fd)
+        print("  device id (before): %s" % before)
+        if "FWVER:" in before and not force:
+            print("  firmware already loaded - nothing to do")
+            return True
+
+        ioctl(fd, RESET)
+        time.sleep(5)                 # let the freshly-reset device settle
+        ioctl(fd, CLAIM, uarg(0))
+        for ep in (EP_OUT, EP_IN):
+            try:
+                ioctl(fd, CLEAR, uarg(ep))
+            except OSError:
+                pass
+
+        total = i = stalls = badrun = 0
+        while i < len(payload):
+            piece = payload[i:i + CHUNK]
+            buf = ctypes.create_string_buffer(piece, len(piece))
+            arg = ctypes.create_string_buffer(
+                struct.pack("IIIQ", EP_OUT, len(piece), TIMEOUT_MS,
+                            ctypes.addressof(buf)))
+            try:
+                n = ioctl(fd, BULK, arg)
+                total += n
+                i += n
+                badrun = 0
+            except OSError:
+                stalls += 1
+                badrun += 1
+                if badrun > MAX_BAD_RUN:
+                    print("  ERROR: %d consecutive stalls at offset %d"
+                          % (badrun, i), file=sys.stderr)
+                    return False
+                try:
+                    ioctl(fd, CLEAR, uarg(EP_OUT))
+                except OSError:
+                    pass
+                time.sleep(0.1)
+
+        print("  uploaded %d/%d bytes (%d stalls recovered)"
+              % (total, len(payload), stalls))
+        time.sleep(2)
+        try:
+            print("  device id (after):  %s" % device_id(fd))
+        except OSError as e:
+            print("  device id (after):  <%s> (printer is rebooting)" % e)
+        return total == len(payload)
+    finally:
+        try:
+            ioctl(fd, RELEASE, uarg(0))
+        except OSError:
+            pass
+        os.close(fd)
+        rebind_usblp(sysdev)
+
+
+if __name__ == "__main__":
+    force = "--force" in sys.argv
+    if not os.path.exists(FW):
+        print("ERROR: %s is missing - run ./fetch-firmware.sh" % FW,
+              file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0 if upload(FW, force) else 1)
