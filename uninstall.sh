@@ -14,5 +14,22 @@ rm -f /etc/systemd/system/hp-lj1000-loadfw.service
 systemctl daemon-reload
 udevadm control --reload-rules
 
-echo "Removed loader, udev rule and systemd unit."
+# Toner boost: put the PPDs back the way they were.
+for ppd in /etc/cups/ppd/*.ppd; do
+    [ -f "$ppd" ] || continue
+    if grep -q 'FoomaticRIPCommandLine: "/usr/local/bin/hp-lj1000-render %A"' "$ppd"; then
+        if [ -f "$ppd.bak" ]; then
+            echo "==> restoring $(basename "$ppd") from $ppd.bak"
+            cp -a "$ppd.bak" "$ppd"
+        else
+            echo "==> reverting $(basename "$ppd") in place"
+            sed -i 's|FoomaticRIPCommandLine: "/usr/local/bin/hp-lj1000-render %A"|FoomaticRIPCommandLine: "foo2zjs-wrapper %A"|' "$ppd"
+        fi
+    fi
+done
+
+rm -f /usr/local/bin/hp-lj1000-render
+rm -f /etc/hp-lj1000-toner
+
+echo "Removed loader, udev rule, systemd unit and toner-boost renderer."
 echo "(The firmware image in /usr/share/foo2zjs/firmware/ was left alone.)"

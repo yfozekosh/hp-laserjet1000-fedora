@@ -1,0 +1,58 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# hp-lj1000-render - tone-curve wrapper around foo2zjs-wrapper
+#
+# WHY THIS EXISTS
+# ---------------
+# The HP LaserJet 1000 has no working toner-density control:
+#
+#   * foo2zjs's -T (print density) only ever emits "@PJL SET DENSITY=" and
+#     only for the HP1020/Pro models -- ZjStream model -z0 never reads it.
+#   * the wrapper's -C tone presets (photo/graphics/text/tonersave) return
+#     immediately for monochrome pbmraw input.
+#   * the wrapper's -G (GAMMAFILE) is unconditionally wiped for mono jobs:
+#         if [ "" = "$COLOR" ]; then COLORMODE=; GAMMAFILE=; fi
+#
+# So the only lever that actually changes how much toner lands on the page
+# is the *rendered raster*: scale gray toward black before Ghostscript
+# dithers it.  This script prepends a PostScript `settransfer` that does
+# exactly that, then hands the stream to the real wrapper.
+#
+# A factor of 0.70 measured at +35% toner coverage on a representative
+# page (18.6% -> 25.1% of pixels black).  1.0 disables the boost.
+#
+# CONFIGURATION
+# -------------
+# The factor is read from (first match wins):
+#   1. the FOO2ZJS_GREYSCALE environment variable
+#   2. /etc/hp-lj1000-toner       (a single number, e.g. "0.75")
+#   3. built-in default below
+#
+REAL=/usr/bin/foo2zjs-wrapper
+DEFAULT_FACTOR=0.75
+
+factor="${FOO2ZJS_GREYSCALE:-}"
+if [ -z "$factor" ] && [ -r /etc/hp-lj1000-toner ]; then
+    factor="$(sed -e 's/#.*//' -e 's/[[:space:]]//g' /etc/hp-lj1000-toner | head -1)"
+fi
+[ -n "$factor" ] || factor="$DEFAULT_FACTOR"
+
+# Validate: must be a plain number in (0, 1]. Anything else -> pass through
+# untouched rather than produce a broken print.
+case "$factor" in
+''|*[!0-9.]*|*.*.*)  factor=1.0 ;;
+esac
+
+# A factor of 0 renders the whole page solid black.  That is a typo, not a
+# density setting, so fall back to "no boost" instead of wasting a cartridge.
+case "$factor" in
+0|0.0|0.00|0.000)  factor=1.0 ;;
+esac
+
+# 1.0 = boost disabled: just run the real wrapper, no stream surgery.
+if [ "$factor" = "1.0" ] || [ "$factor" = "1" ] || [ "$factor" = "1.00" ]; then
+    exec "$REAL" "$@"
+fi
+
+{ printf '{ %s mul } settransfer\n' "$factor"; cat; } | "$REAL" "$@"

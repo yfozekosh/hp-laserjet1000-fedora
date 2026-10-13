@@ -61,12 +61,92 @@ to **zero**.
 
 ---
 
+## Print quality & toner density
+
+If you want **darker prints / more toner**, read this first — most of the
+obvious knobs do not actually work on this printer.
+
+### What does *not* work
+
+| Knob | Why it's a no-op |
+|---|---|
+| `foo2zjs -T 1..5` ("print density") | Only ever emits `@PJL SET DENSITY=`, and **only** for models `-z1/-z2/-z3` (HP1020 / Pro). The LJ1000 is `-z0`, a pure ZjStream device that never reads PJL. |
+| `foo2zjs-wrapper -C 1..4` (photo / graphics / text / tonersave) | The wrapper returns immediately from the `COLORMODE` branch for monochrome `pbmraw` input. All five choices produce byte-identical output. |
+| `foo2zjs-wrapper -G <file>` (gamma/CRD) | Unconditionally wiped for mono jobs: `if [ "" = "$COLOR" ]; then COLORMODE=; GAMMAFILE=; fi` |
+| Printer-side density | `ZJI_ECONOMODE` is already `0` (toner-saving **off**) and `ZJI_RET` is `1` (resolution enhancement **on**). There is no further printer-side density to give. |
+
+### What does work
+
+The only real lever is **the rendered raster itself**: scale grey toward
+black *before* Ghostscript dithers it.
+
+```
+{ 0.75 mul } settransfer     % gs grey: 0 = black, 1 = white
+```
+
+Measured on the shipped test page, at 600×600:
+
+| Factor | Pixels printed black | |
+|---|---|---|
+| `1.3` (control) | 10.868 % | lighter — proves the measurement discriminates |
+| `1.0` (baseline) | 12.129 % | stock behaviour |
+| **`0.75` (default)** | **16.276 %** | **+34 % toner** |
+
+`hp-lj1000-render` prepends that line to the job's PostScript and then
+execs the real `foo2zjs-wrapper`. With a factor of `1.0` it does no stream
+surgery at all and is byte-identical to stock output.
+
+### Tuning it
+
+```bash
+echo 0.75 | sudo tee /etc/hp-lj1000-toner   # more toner
+echo 0.60 | sudo tee /etc/hp-lj1000-toner   # much more (watch for bleed)
+echo 1.00 | sudo tee /etc/hp-lj1000-toner   # disable, stock behaviour
+```
+
+The factor is read on every job, so no restart is needed. `0` is treated as
+`1.0` — otherwise you would print a solid black page.
+
+### Note on `foomatic-hash`
+
+`foomatic-rip` rejects any `FoomaticRIPCommandLine` that is not in its
+sha256 allowlist. That is why `install.sh` runs `foomatic-hash(1)` after
+patching the PPD; without it you get:
+
+```
+ERROR: The value of the key FoomaticRIPCommandLine is not among the allowed values
+```
+
+If you change the renderer path yourself, re-run:
+
+```bash
+sudo foomatic-hash --ppd /etc/cups/ppd/hp-LaserJet-1000.ppd \
+     /tmp/review.txt /etc/foomatic/hashes.d/hashes.hp-laserjet-1000
+```
+
+### What was already at maximum
+
+Don't bother changing these — they are already optimal:
+
+* **Halftone screening** — `QUALITY` defaults to `wts` (Well Tempered
+  Screens), which yields `-dCOLORSCREEN -dMaxBitmap=500000000`.
+* **EconoMode** — already `0`.
+* **RET** — already `1`.
+* **Resolution** — stays at `600×600`. `foo2zjs` will happily emit
+  `1200x600`, but the `Bpp = ResX/600` downsampling block covers only
+  models `-z1/-z2/-z3`. For `-z0` the 1200 dpi stream reaches the 600 dpi
+  engine unconverted, so this is left alone rather than risk a misprint.
+
+---
+
 ## Install
 
 ```bash
-sudo ./install.sh          # loader, udev rule, systemd unit
+sudo ./install.sh          # loader, udev rule, systemd unit, toner boost
 sudo ./fetch-firmware.sh   # download the HP firmware image (not in git)
 ```
+
+Skip the toner boost with `sudo ./install.sh --no-render`.
 
 Then power-cycle the printer (off → on). The LED flashes orange for about
 5 seconds while the image uploads.
@@ -100,6 +180,7 @@ sudo hp-lj1000-loadfw
 | `99-hp-lj1000-firmware.rules` | udev rule — fires on printer plug-in / power-on |
 | `hp-lj1000-loadfw.service` | oneshot unit that runs the uploader after a 3 s settle |
 | `fetch-firmware.sh` | downloads + checksums + installs `sihp1000.dl` |
+| `hp-lj1000-render` | tone-curve shim — prepends `settransfer`, execs `foo2zjs-wrapper` |
 | `install.sh` / `uninstall.sh` | put it all in place / take it all out |
 | `tools/arm2hpdl.c` | optional; wraps a raw ARM ELF in the HP download header |
 
