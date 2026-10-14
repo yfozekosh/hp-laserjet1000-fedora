@@ -296,6 +296,20 @@ redistribute it only as HP permits.
 
 ---
 
+## Open firmware
+
+[`open-firmware/`](open-firmware/) holds the reverse-engineering work towards
+a clean-room, GPL reimplementation of the printer's downloaded firmware.
+Current state and all the analysis notes — container format, memory map,
+startup path, MMIO register map, and how to get an image to actually run —
+are in [`open-firmware/README.md`](open-firmware/README.md).
+
+Proven so far: an image modified by our own tooling boots on the printer,
+appears in `GET_DEVICE_ID` as `FWVER:20991231`, and prints. Changing those
+four bytes costs you nothing but a power cycle; there is no flash to damage.
+
+---
+
 ## Notes
 
 * **This cannot brick the printer.** There is no writable engine flash to

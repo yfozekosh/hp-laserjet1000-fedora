@@ -19,6 +19,12 @@ foo2zjs
 __pycache__/
 *.pyc
 
+# open-firmware: regenerable analysis artifacts.  symbols.json is derived
+# from the HP binary, so like the binary itself it never enters git.
+open-firmware/tools/lj1000.elf
+open-firmware/tools/lj1000.r2cmds
+open-firmware/tools/symbols.json
+
 # --- Scratch ----------------------------------------------------------
 work/
 tmp/

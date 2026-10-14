@@ -16,9 +16,13 @@ This uploader talks to usbfs directly and recovers each stall with
 USBDEVFS_CLEAR_HALT, which is how the 114 KB image gets delivered intact.
 
 Usage:
-    hp-lj1000-loadfw [--force]
+    hp-lj1000-loadfw [--force] [image.dl]
 
     --force   re-upload even if the printer already reports FWVER:
+    image.dl  upload this image instead of the stock one (used to try out
+              test images built with open-firmware/tools; a power cycle
+              always falls back to the stock image, because the firmware
+              lives only in RAM and is never written to flash)
 """
 import ctypes
 import ctypes.util
@@ -261,11 +265,16 @@ def reenable_queue():
 
 if __name__ == "__main__":
     force = "--force" in sys.argv
-    if not os.path.exists(FW):
-        print("ERROR: %s is missing - run ./fetch-firmware.sh" % FW,
-              file=sys.stderr)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    fw = args[0] if args else FW
+    if not os.path.exists(fw):
+        if fw == FW:
+            print("ERROR: %s is missing - run ./fetch-firmware.sh" % FW,
+                  file=sys.stderr)
+        else:
+            print("ERROR: %s does not exist" % fw, file=sys.stderr)
         sys.exit(1)
-    ok = upload(FW, force)
+    ok = upload(fw, force)
     if ok:
         # Only when the printer is actually usable again.
         reenable_queue()
